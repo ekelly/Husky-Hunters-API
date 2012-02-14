@@ -1,18 +1,21 @@
 import tornado.ioloop
 import tornado.web
-import tornado.database
+import psycopg2
 import functools
 import json
 import os
+import sys
 import uuid
 import urlparse
 import clues
+from contextlib import contextmanager
 
 DATABASE_URL = urlparse.urlparse(os.environ['DATABASE_URL'])
 
-# (clue_number, answer, original_text, points, location, is_solved, photos)
-
-# Issues: no transactions. db.close() should be in some sort of deconstructor
+@contextmanager
+def commit(connection):
+  yield
+  connection.commit()
 
 def jsonp(name, body):
   return "%s(%s)" % (name, body)
@@ -24,26 +27,35 @@ def generate_id():
 def valid_team(fun):
   @functools.wraps(fun)
   def wrapped(self, team, *args, **kwargs):
-    if not self.db.execute_rowcount("select * from teams where id = %s", team) > 0:
+    self.cursor.execute("select count(*) from teams where id = %s", (team,))
+    team_count = self.cursor.fetchone()[0]
+
+    if not team_count > 0:
       raise tornado.web.HTTPError(404)
+
     fun(self, team, *args, **kwargs)
   return wrapped
 
 def existing_clue(fun):
   @functools.wraps(fun)
   def wrapped(self, team, clue, *args, **kwargs):
-    if clues.get(self.db, team, clue) is None:
+    if clues.get(self.cursor, team, clue) is None:
       raise tornado.web.HTTPError(404)
+
     fun(self, team, clue, *args, **kwargs)
   return wrapped
 
 class BaseHandler(tornado.web.RequestHandler):
-  def __init__(self, *args, **kwargs):
-    super(BaseHandler, self).__init__(*args, **kwargs)
+  def prepare(self):
     self.jsonp_callback = self.get_argument("callback", "")
     self.has_jsonp_callback = self.jsonp_callback != ""
-    self.db = tornado.database.Connection(DATABASE_URL.hostname, DATABASE_URL.path[1:],
-                                          user=DATABASE_URL.username, password=DATABASE_URL.password)
+    self.connection = psycopg2.connect(host=DATABASE_URL.hostname, database=DATABASE_URL.path[1:],
+                                       user=DATABASE_URL.username, password=DATABASE_URL.password)
+    self.cursor = self.connection.cursor()
+
+  def on_finish(self):
+    self.cursor.close()
+    self.connection.close()
 
   def writeJsonp(self, body):
     self.write(jsonp(self.jsonp_callback, body) if self.has_jsonp_callback else body)
@@ -51,60 +63,54 @@ class BaseHandler(tornado.web.RequestHandler):
 class CluesHandler(BaseHandler):
   @valid_team
   def get(self, team):
-    self.writeJsonp(json.dumps(clues.get_all(self.db, team)))
-    self.db.close()
+    self.writeJsonp(json.dumps(clues.get_all(self.cursor, team)))
 
 class ClueHandler(BaseHandler):
   @valid_team
   @existing_clue
   def get(self, team, clue_number):
-    self.writeJsonp(clues.get_json(self.db, team, clue_number))
-    self.db.close()
+    self.writeJsonp(clues.get_json(self.cursor, team, clue_number))
 
   @valid_team
   def put(self, team, clue_number):
-    if self.request.headers.get("Expect", "") == "100-continue":
-      self.set_header("Accept", "text/plain, application/json")
-      self.set_status(100)
-      return
-
     clue = clues.decode(self.request.body)
 
-    if clues.get(self.db, team, clue_number) is None:
-      clues.create(self.db, team, clue_number, clue)
-    else:
-      clue = clues.update(self.db, team, clue_number, clue)
+    with commit(self.connection):
+      if clues.get(self.cursor, team, clue_number) is None:
+        clues.create(self.cursor, team, clue_number, clue)
+      else:
+        clue = clues.update(self.cursor, team, clue_number, clue)
 
-    self.db.close()
     self.writeJsonp(json.dumps(clue))
 
   @valid_team
   @existing_clue
   def delete(self, team, clue_number):
-    clues.delete(self.db, team, clue_number)
-    self.db.close()
+    with commit(self.connection):
+      clues.delete(self.cursor, team, clue_number)
 
 class PhotosHandler(BaseHandler):
   @valid_team
   @existing_clue
   def get(self, team, clue):
-    self.writeJsonp(json.dumps(clues.get(self.db, team, clue)["photos"]))
-    self.db.close()
+    self.writeJsonp(json.dumps(clues.get(self.cursor, team, clue)["photos"]))
 
 class TeamHandler(BaseHandler):
   @valid_team
   def get(self, team):
-    team = self.db.get("select * from teams where id = %s", team)
-    self.writeJsonp(json.dumps({"name": team.name, "id": team.id}))
-    self.db.close()
+    self.cursor.execute("select name, id from teams where id = %s", (team,))
+    team = self.cursor.fetchone()
+    self.writeJsonp(json.dumps({"name": team[0], "id": team[1]}))
 
 class TeamsHandler(BaseHandler):
   def post(self):
     name = self.get_argument("name")
     new_id = generate_id()
-    self.db.execute("insert into teams (id, name) values (%s, %s)", new_id, name)
+
+    with commit(self.connection):
+      self.cursor.execute("insert into teams (id, name) values (%s, %s)", (new_id, name))
+
     self.writeJsonp(json.dumps({"name": name, "id": new_id}))
-    self.db.close()
 
 application = tornado.web.Application([
     (r"/teams/?", TeamsHandler),
@@ -115,5 +121,8 @@ application = tornado.web.Application([
 ])
 
 if __name__ == "__main__":
-    application.listen(os.environ.get("PORT"))
-    tornado.ioloop.IOLoop.instance().start()
+  port = os.environ.get("PORT")
+  print "Listening on port %s" % port
+  sys.stdout.flush()
+  application.listen(port)
+  tornado.ioloop.IOLoop.instance().start()
