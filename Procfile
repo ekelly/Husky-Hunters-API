@@ -1,1 +1,1 @@
-worker: python huskyhunter.py
+web: python huskyhunter.py
