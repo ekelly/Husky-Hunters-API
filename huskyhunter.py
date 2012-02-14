@@ -93,7 +93,7 @@ class PhotosHandler(BaseHandler):
   @valid_team
   @existing_clue
   def get(self, team, clue):
-    self.writeJsonp(json.dumps(clues.get(self.cursor, team, clue)["photos"]))
+    self.writeJsonp(json.dumps(clues.get(self.cursor, team, clue).get("photos", [])))
 
 class TeamHandler(BaseHandler):
   @valid_team
