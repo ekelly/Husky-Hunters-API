@@ -1,2 +1,6 @@
 *.pyc
 .env
+build
+env
+
+.DS_Store
