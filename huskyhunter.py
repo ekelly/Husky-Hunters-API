@@ -58,7 +58,14 @@ class BaseHandler(tornado.web.RequestHandler):
     self.connection.close()
 
   def writeJsonp(self, body):
+    self.set_header('Access-Control-Allow-Origin', '*')
     self.write(jsonp(self.jsonp_callback, body) if self.has_jsonp_callback else body)
+  
+  def options(self, *args, **kwargs):
+    self.set_header('Access-Control-Allow-Origin', '*')
+    self.set_header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+    self.set_header('Access-Control-Allow-Headers', 'Content-Type')
+    self.set_status(200)
 
 class CluesHandler(BaseHandler):
   @valid_team
@@ -74,6 +81,7 @@ class ClueHandler(BaseHandler):
   @valid_team
   def put(self, team, clue_number):
     clue = clues.decode(self.request.body)
+    print clue
 
     with commit(self.connection):
       if clues.get(self.cursor, team, clue_number) is None:
@@ -103,14 +111,22 @@ class TeamHandler(BaseHandler):
     self.writeJsonp(json.dumps({"name": team[0], "id": team[1]}))
 
 class TeamsHandler(BaseHandler):
-  def post(self):
+  def makeTeam(self):
     name = self.get_argument("name")
     new_id = generate_id()
 
     with commit(self.connection):
       self.cursor.execute("insert into teams (id, name) values (%s, %s)", (new_id, name))
-
-    self.writeJsonp(json.dumps({"name": name, "id": new_id}))
+    
+    return {"name": name, "id": new_id}
+  
+  def get(self):
+    name = self.get_argument("name")
+    self.writeJsonp(json.dumps(self.makeTeam()))
+  
+  def post(self):
+    name = self.get_argument("name")
+    self.writeJsonp(json.dumps(self.makeTeam()))
 
 application = tornado.web.Application([
     (r"/teams/?", TeamsHandler),

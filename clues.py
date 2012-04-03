@@ -6,6 +6,7 @@ utf8_decoder = codecs.getdecoder("utf_8")
 def encode(clue):
   return json.dumps(clue)
 
+# translates from API fields to JSON
 def decode(clue_json):
   # TODO: field validation.
   clue = json.loads(utf8_decoder(clue_json)[0])
